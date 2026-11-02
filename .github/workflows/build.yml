@@ -1,0 +1,65 @@
+name: build
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: unpack source
+        run: |
+          if ls *.tar.gz >/dev/null 2>&1; then tar xzf $(ls *.tar.gz | head -1); fi
+          if ls *.zip >/dev/null 2>&1; then unzip -o $(ls *.zip | head -1); fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: install android sdk cmdline-tools + ndk
+        run: |
+          SDK=$HOME/android-sdk
+          mkdir -p "$SDK/cmdline-tools"
+          cd "$SDK/cmdline-tools"
+          curl -sSL -o tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q tools.zip
+          mv cmdline-tools latest
+          rm tools.zip
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+          "$SDK/cmdline-tools/latest/bin/sdkmanager" "platform-tools" "platforms;android-33" "build-tools;33.0.2" "ndk;26.1.10909125"
+
+      - name: build ox_core (arm64, external)
+        run: |
+          cd ox_esp
+          NDK=$ANDROID_HOME/ndk/26.1.10909125
+          $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++ \
+            -std=c++20 -O2 -fPIC -Isrc -o ox_core \
+            src/ox_main.cpp src/ox_game.cpp src/il2cpp.cpp src/mem.cpp src/code.cpp
+
+      - name: build astral_internal.so + astral_inject (internal mode)
+        run: |
+          cd ox_esp
+          NDK=$ANDROID_HOME/ndk/26.1.10909125
+          CXX=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++
+          $CXX -std=c++20 -O2 -fPIC -shared -Isrc -o astral_internal.so \
+            src/inject/entry.cpp src/ox_game.cpp src/il2cpp.cpp src/code.cpp src/local_mem.cpp
+          $CXX -std=c++20 -O2 -Isrc -o astral_inject \
+            src/inject/injector.cpp src/mem.cpp
+
+      - name: build apk
+        run: |
+          cd ox_esp
+          chmod +x build_apk.sh
+          ./build_apk.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ox-esp-apk
+          path: ox_esp/ox_esp.apk
